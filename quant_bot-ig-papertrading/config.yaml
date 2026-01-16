@@ -1,0 +1,60 @@
+strategy:
+  name: IG_Quant_Run
+  universe: [QQQ, SPY, GLD]
+  rsi_period: 14
+  sma_period: 200
+  rsi_entry_threshold: 30
+  # Mean-reversion exit for daily bars
+  rsi_exit_threshold: 50
+  regime_filter: BULL_STABLE
+
+risk:
+  initial_capital: 100000.0
+  max_slots: 2
+  max_drawdown_limit: 0.15
+
+  # Margin-style cap (kept for safety)
+  per_slot_margin_fraction: 0.15
+  min_free_margin_buffer: 0.10
+  allow_shorting: false
+
+  # Technique upgrades (set to 0 to disable)
+  risk_per_trade_fraction: 0.005
+  atr_stop_mult: 2.0
+  atr_take_profit_mult: 2.5
+  max_hold_days: 10
+  avoid_same_group: true
+
+costs:
+  annual_funding_rate: 0.05
+  weekend_multiplier: 3
+  adaptive_spread_k: 0.10
+  commission_fixed: 0.0
+
+vault:
+  output_path: vault/runs
+
+# Live runner configuration (IG Spread Betting / CFD)
+# Use environment variables for credentials. You can set them via a .env file at repo root.
+live:
+  # Guardrail: keep DEMO until you are ready
+  acc_type: DEMO            # DEMO or LIVE
+  allow_live: false         # must be true to allow acc_type: LIVE
+
+  # Credentials (expanded from env): ${VAR} or ${VAR:default}
+  api_key: ${IG_API_KEY:}
+  username: ${IG_USERNAME:}
+  password: ${IG_PASSWORD:}
+  acc_number: ${IG_ACCOUNT_ID:}
+
+  # IG order defaults
+  currency_code: GBP
+  expiry: DFB
+
+  # Market data
+  resolution: DAY
+  lookback_points: 450
+
+  # State and safety
+  dry_run: true
+  state_path: vault/live_state/state.json

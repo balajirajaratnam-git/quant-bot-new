@@ -1,0 +1,16 @@
+# Core
+pandas>=2.0
+numpy>=1.24
+pyyaml>=6.0
+
+# Optional .env support (recommended for live runner)
+python-dotenv>=1.0
+
+# Data
+yfinance>=0.2
+
+# Output (parquet)
+pyarrow>=12.0
+
+# Optional (live adapter)
+trading-ig>=0.0.18

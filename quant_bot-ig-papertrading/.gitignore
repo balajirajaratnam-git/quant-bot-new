@@ -1,0 +1,10 @@
+# Python
+__pycache__/
+*.pyc
+
+# Local secrets
+.env
+
+# Local artifacts
+vault/runs/
+vault/live_state/state.json
