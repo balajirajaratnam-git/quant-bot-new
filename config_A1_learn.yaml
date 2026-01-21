@@ -1,12 +1,12 @@
 strategy:
-  name: IG_MR_A1
+  name: IG_MR_A1_LEARN_ANY40
   universe:
   - QQQ
   rsi_period: 14
   sma_period: 200
-  rsi_entry_threshold: 30
+  rsi_entry_threshold: 40
   rsi_exit_threshold: 50
-  regime_filter: BULL_STABLE
+  regime_filter: ANY
   require_trend_up: true
   require_rsi_turn: true
 risk:

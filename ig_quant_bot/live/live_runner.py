@@ -78,12 +78,20 @@ class LiveQuantDesk:
         self.rsi_exit = float(strat.get("rsi_exit_threshold", 50))
         self.regime_filter = str(strat.get("regime_filter", "BULL_STABLE"))
 
+        self.require_trend_up = bool(strat.get("require_trend_up", False))
+        self.require_rsi_turn = bool(strat.get("require_rsi_turn", False))
+        self.min_signal_strength = float(strat.get("min_signal_strength", 0.0))
+
         self.initial_capital = float(risk.get("initial_capital", 100000.0))
         self.max_slots = int(risk.get("max_slots", 2))
         self.max_dd_limit = float(risk.get("max_drawdown_limit", 0.15))
         self.per_slot_margin_fraction = float(risk.get("per_slot_margin_fraction", 0.15))
         self.min_free_margin_buffer = float(risk.get("min_free_margin_buffer", 0.10))
         self.allow_shorting = bool(risk.get("allow_shorting", False))
+
+        # Optional: override hardcoded instrument margin factors from config.
+        # This helps when IG raises margin requirements in volatile periods.
+        self.margin_factor_override = {str(k).upper(): float(v) for k, v in (risk.get("margin_factor_override") or {}).items()}
 
         self.risk_per_trade_fraction = float(risk.get("risk_per_trade_fraction", 0.0))
         self.atr_stop_mult = float(risk.get("atr_stop_mult", 0.0))
@@ -645,6 +653,8 @@ class LiveQuantDesk:
                         rsi_entry_threshold=self.rsi_entry,
                         min_signal_strength=self.min_signal_strength,
                         regime_filter=self.regime_filter,
+                        require_trend_up=self.require_trend_up,
+                        require_rsi_turn=self.require_rsi_turn,
                     )
 
                     if not should_enter:
@@ -700,7 +710,8 @@ class LiveQuantDesk:
 
                     # Sizing (margin-based cap + optional risk-per-trade cap)
                     max_margin_for_slot = float(ps.equity) * float(self.per_slot_margin_fraction)
-                    stake_by_margin = max_margin_for_slot / (float(mid) * float(inst.value_per_point) * float(inst.margin_factor))
+                    mf = float(self.margin_factor_override.get(t, inst.margin_factor))
+                    stake_by_margin = max_margin_for_slot / (float(mid) * float(inst.value_per_point) * mf)
 
                     # Optional risk-based sizing (stake = risk_cash / (stop_distance * value_per_point))
                     stake_by_risk = float("inf")
@@ -716,7 +727,7 @@ class LiveQuantDesk:
                     stake = max(0.5, round(stake, 2))  # IG min stake differs by market, keep a conservative floor
 
                     # Free margin buffer gate
-                    projected_margin = stake * float(mid) * float(inst.value_per_point) * float(inst.margin_factor)
+                    projected_margin = stake * float(mid) * float(inst.value_per_point) * mf
                     projected_free_margin = float(ps.free_margin) - projected_margin
                     if projected_free_margin < (float(ps.equity) * float(self.min_free_margin_buffer)):
                         decision_logger.log(
@@ -1009,7 +1020,8 @@ class LiveQuantDesk:
                 avg = 1.0
 
             gross = qty * avg * float(inst.value_per_point)
-            margin = float(info.get("margin_deposit")) if info.get("margin_deposit") not in (None, 0, 0.0) else gross * float(inst.margin_factor)
+            mf = float(self.margin_factor_override.get(t, inst.margin_factor))
+            margin = float(info.get("margin_deposit")) if info.get("margin_deposit") not in (None, 0, 0.0) else gross * mf
 
             deal_id = str(info.get("deal_id") or "")
 

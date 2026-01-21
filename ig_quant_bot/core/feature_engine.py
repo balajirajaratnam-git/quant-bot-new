@@ -37,7 +37,16 @@ class FeatureEngine:
         required = {"Open", "High", "Low", "Close"}
         missing = required.difference(set(f.columns))
         if missing:
-            raise ValueError(f"FeatureEngine.compute missing required columns: {sorted(missing)}")
+            # Backtest robustness: if only Close is available, synthesize OHLC from Close.
+            # This keeps RSI based tests runnable when a data source returns Close only.
+            if ("Close" in f.columns) and all(k not in f.columns for k in ("Open", "High", "Low")):
+                f = f.copy()
+                f["Open"] = f["Close"]
+                f["High"] = f["Close"]
+                f["Low"] = f["Close"]
+                f["synthetic_ohlc"] = True
+            else:
+                raise ValueError(f"FeatureEngine.compute missing required columns: {sorted(missing)}")
 
         # Auto-generate is_real_bar if not present (fixes live runner bug)
         if "is_real_bar" not in f.columns:
@@ -75,6 +84,18 @@ class FeatureEngine:
         # NEW: Distance from SMA as percentage (for mean-reversion magnitude)
         f["Distance_From_SMA_Pct"] = (f["Close"] - f["SMA"]) / f["SMA"].replace(0.0, np.nan) * 100
 
+        # NEW: Trend strength score (0-100) used for graduated regime / signal quality
+        # Combines how far price is above SMA (up to +10%) and how strongly the SMA is rising.
+        # This is intentionally simple and robust for daily bars.
+        sma_safe = f["SMA"].replace(0.0, np.nan)
+        slope_pct = (f["SMA_Slope"] / sma_safe) * 100.0
+        dist_pct = f["Distance_From_SMA_Pct"]
+        # Distance score: 0..60
+        dist_score = dist_pct.clip(lower=0.0, upper=10.0) / 10.0 * 60.0
+        # Slope score: 0..40 (cap at ~1.5% rise over the slope window)
+        slope_score = slope_pct.clip(lower=0.0, upper=1.5) / 1.5 * 40.0
+        f["Trend_Strength"] = (dist_score.fillna(0.0) + slope_score.fillna(0.0)).clip(0.0, 100.0)
+
         # ----------------
         # 3) ATR in points and pct
         # ----------------
@@ -89,33 +110,20 @@ class FeatureEngine:
         # ----------------
         # 4) Vol threshold + regimes (calendar-safe rolling median)
         # ----------------
-        f["Vol_Median"] = f["ATR_pct"].rolling(252, min_periods=252).median()
+        f["Vol_Median"] = f["ATR_pct"].rolling(60, min_periods=30).median()
 
-        # NEW: Trend strength as continuous score (0-100) instead of just binary regime
-        # Combines: price vs SMA, SMA slope direction, volatility environment
-        trend_score = pd.Series(50.0, index=f.index)  # Neutral baseline
-
-        # Price position relative to SMA: +/- 25 points
-        above_sma = f["Close"] > f["SMA"]
-        trend_score = trend_score + np.where(above_sma, 25, -25)
-
-        # SMA slope direction: +/- 15 points
-        slope_positive = f["SMA_Slope"] > 0
-        trend_score = trend_score + np.where(slope_positive, 15, -15)
-
-        # Volatility environment: +/- 10 points (low vol is bullish for mean-reversion)
-        low_vol = f["ATR_pct"] <= f["Vol_Median"]
-        trend_score = trend_score + np.where(low_vol, 10, -10)
-
-        f["Trend_Strength"] = trend_score.clip(0, 100)
-
-        # Original binary regime (kept for backward compatibility)
+        # Regime labelling:
+        # - TREND_UP: price above long SMA and SMA rising (less strict)
+        # - BULL_STABLE: TREND_UP plus low volatility (more strict)
+        # - BEAR_TREND: price below SMA and elevated volatility
         f["Regime"] = "NEUTRAL"
-        bull_mask = (
-            (f["Close"] > f["SMA"]) & (f["SMA_Slope"] > 0) & (f["ATR_pct"] <= f["Vol_Median"])
-        )
+
+        trend_up_mask = (f["Close"] > f["SMA"]) & (f["SMA_Slope"] > 0)
+        bull_stable_mask = trend_up_mask & (f["ATR_pct"] <= f["Vol_Median"])
         bear_mask = (f["Close"] < f["SMA"]) & (f["ATR_pct"] > f["Vol_Median"])
-        f.loc[bull_mask, "Regime"] = "BULL_STABLE"
+
+        f.loc[trend_up_mask, "Regime"] = "TREND_UP"
+        f.loc[bull_stable_mask, "Regime"] = "BULL_STABLE"
         f.loc[bear_mask, "Regime"] = "BEAR_TREND"
 
         # ----------------

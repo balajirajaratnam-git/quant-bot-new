@@ -1,98 +1,55 @@
 strategy:
   name: IG_MR_A2_RUNNER
-  universe: [QQQ]
+  universe:
+  - QQQ
   rsi_period: 14
   sma_period: 200
-  # Slightly tighter entry threshold - require deeper oversold for higher quality signals
-  rsi_entry_threshold: 28
-  # Exit earlier for better profit capture (was 50)
-  rsi_exit_threshold: 45
+  rsi_entry_threshold: 30
+  rsi_exit_threshold: 60
   regime_filter: BULL_STABLE
-  # NEW: Minimum signal strength score to consider entry (0-100 scale)
-  min_signal_strength: 50
-
+  require_trend_up: true
+  require_rsi_turn: true
 risk:
   initial_capital: 100000.0
-  max_slots: 2
-  max_drawdown_limit: 0.15
-
-  # Margin-style cap (kept for safety)
-  per_slot_margin_fraction: 0.10
+  max_slots: 1
+  max_drawdown_limit: 0.1
+  per_slot_margin_fraction: 0.1
   min_free_margin_buffer: 0.15
   allow_shorting: false
-
-  # Technique upgrades
-  risk_per_trade_fraction: 0.005
-  # Tighter initial stop (was 2.0) - limits max loss per trade
-  atr_stop_mult: 1.5
-  # Tighter take profit (was 2.5) - captures gains more reliably
-  atr_take_profit_mult: 2.0
-  max_hold_days: 10
+  risk_per_trade_fraction: 0.004
+  atr_stop_mult: 2.0
+  atr_take_profit_mult: 0.0
+  max_hold_days: 15
   avoid_same_group: true
-
-  # NEW: Trailing stop configuration
-  trailing_stop:
-    # Enable trailing stop that moves up as price moves favorably
-    enabled: true
-    # Start trailing after price moves this many ATRs in our favor
-    activation_atr_mult: 1.0
-    # Trail this many ATRs behind the highest price since entry
-    trail_atr_mult: 1.2
-
-  # NEW: Early adverse exit - cut losses early if trade doesn't move in our favor
-  adverse_exit:
-    enabled: true
-    # If trade is still underwater after this many days, consider cutting
-    min_days: 3
-    # Cut if RSI has recovered but price hasn't (failed reversal)
-    rsi_recovered_threshold: 40
-
 costs:
   annual_funding_rate: 0.05
   weekend_multiplier: 3
-  adaptive_spread_k: 0.10
+  adaptive_spread_k: 0.1
   commission_fixed: 0.0
-
 vault:
   output_path: vault/runs
-
-# Live runner configuration (IG Spread Betting / CFD)
 live:
-  # Guardrail: keep DEMO until you are ready
   acc_type: DEMO
   allow_live: false
-
-  # Credentials (expanded from env)
   api_key: ${IG_API_KEY:}
   username: ${IG_USERNAME:}
   password: ${IG_PASSWORD:}
   acc_number: ${IG_ACCOUNT_ID:}
-
-  # IG order defaults
   currency_code: GBP
   expiry: DFB
-
-  # Market data
   resolution: DAY
   lookback_points: 450
-
-  # IG API quota protection
   rate_limit:
     min_interval_seconds: 3.0
-    cooldown_seconds_on_exceeded: 75.0
+    cooldown_seconds_on_exceeded: 90.0
     max_retries: 1
-
   history_cache:
     enabled: true
     dir: vault/cache/ig_history
     max_age_hours: 168.0
     refresh_tail_numpoints: 10
-
   api_budget:
     max_history_calls_per_run: 1
-
   allow_yfinance_history_fallback: true
-
-  # State and safety
   dry_run: true
   state_path: vault/live_state/state.json

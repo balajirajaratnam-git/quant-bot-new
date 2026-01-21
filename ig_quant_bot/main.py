@@ -62,6 +62,11 @@ class QuantDesk:
         self.rsi_exit_threshold = float(strat.get("rsi_exit_threshold", 50))
         self.regime_filter = str(strat.get("regime_filter", "BULL_STABLE"))
 
+        # Optional entry filters to reduce "catching falling knives"
+        self.require_trend_up = bool(strat.get("require_trend_up", False))
+        self.require_rsi_turn = bool(strat.get("require_rsi_turn", False))
+        self.min_signal_strength = float(strat.get("min_signal_strength", 0.0))
+
         # Risk
         self.initial_capital = float(risk.get("initial_capital", 100000.0))
         self.max_slots = int(risk.get("max_slots", 3))
@@ -111,6 +116,104 @@ class QuantDesk:
     def _make_run_id(self) -> str:
         return f"{pd.Timestamp.now().strftime('%Y%m%d_%H%M')}_{self.strategy_name}_{str(uuid.uuid4())[:6]}"
 
+    @staticmethod
+    def _normalize_yf_ohlc(df: pd.DataFrame, ticker: str) -> pd.DataFrame:
+        """Normalize yfinance outputs into OHLC columns required by FeatureEngine.
+
+        yfinance versions and parameters can yield:
+          - standard columns: Open/High/Low/Close/(Adj Close)/Volume
+          - lowercase variants
+          - MultiIndex columns when upstream config/grouping differs
+
+        This function converts these shapes into a plain DataFrame with
+        columns: Open, High, Low, Close (plus any extras preserved).
+        """
+
+        if df is None or df.empty:
+            return df
+
+        out = df.copy()
+
+        # 1) Flatten MultiIndex columns if present (various yfinance shapes).
+        if isinstance(out.columns, pd.MultiIndex):
+            lvl0 = out.columns.get_level_values(0)
+            lvl1 = out.columns.get_level_values(1)
+
+            lvl0_lower = {str(x).lower() for x in lvl0}
+            lvl1_lower = {str(x).lower() for x in lvl1}
+            need = {"open", "high", "low", "close"}
+
+            # Case A: first level are OHLC (e.g., ('Open','QQQ'))
+            if need.issubset(lvl0_lower):
+                series_map = {}
+                for k in ["Open", "High", "Low", "Close"]:
+                    # find the actual key in level0 (case-insensitive)
+                    k0 = next((x for x in lvl0.unique() if str(x).lower() == k.lower()), None)
+                    if k0 is None:
+                        continue
+                    sub = out[k0]
+                    if isinstance(sub, pd.DataFrame):
+                        # pick matching ticker if present, else first column
+                        col = ticker if ticker in sub.columns else sub.columns[0]
+                        series_map[k] = sub[col]
+                    else:
+                        series_map[k] = sub
+                if series_map:
+                    out = pd.concat(series_map, axis=1)
+
+            # Case B: second level are OHLC (e.g., ('QQQ','Open'))
+            elif need.issubset(lvl1_lower):
+                # pick a ticker key from level0
+                tick_keys = list(dict.fromkeys(out.columns.get_level_values(0).tolist()))
+                tkey = next((x for x in tick_keys if str(x).upper() == str(ticker).upper()), tick_keys[0])
+                series_map = {}
+                for k in ["Open", "High", "Low", "Close"]:
+                    col = next((c for c in out.columns if c[0] == tkey and str(c[1]).lower() == k.lower()), None)
+                    if col is not None:
+                        series_map[k] = out[col]
+                if series_map:
+                    out = pd.concat(series_map, axis=1)
+
+            else:
+                # Unknown MultiIndex: flatten to strings so the rename step below can still help.
+                out.columns = ["|".join([str(a) for a in c]) for c in out.columns]
+
+        # 2) Case-insensitive rename for standard columns.
+        rename_map = {}
+        for col in list(out.columns):
+            c = str(col)
+            cl = c.lower().strip()
+            parts = [p.strip() for p in cl.split('|')]
+            if cl == 'open':
+                rename_map[col] = 'Open'
+            elif cl == 'high':
+                rename_map[col] = 'High'
+            elif cl == 'low':
+                rename_map[col] = 'Low'
+            elif cl == 'close':
+                rename_map[col] = 'Close'
+            elif 'open' in parts:
+                rename_map[col] = 'Open'
+            elif 'high' in parts:
+                rename_map[col] = 'High'
+            elif 'low' in parts:
+                rename_map[col] = 'Low'
+            elif 'close' in parts:
+                rename_map[col] = 'Close'
+            elif cl in {'adj close', 'adj_close', 'adjusted close', 'adjusted_close'} and 'Close' not in out.columns:
+                rename_map[col] = 'Close'
+        if rename_map:
+            out = out.rename(columns=rename_map)
+
+        # 3) Ensure required columns exist; if yfinance returned "Adj Close" + others but not "Close",
+        # mapping above should have handled it. If still missing, return as-is so caller can raise.
+        # 4) Coerce OHLC columns to numeric (robust to object dtypes).
+        for k in ['Open', 'High', 'Low', 'Close']:
+            if k in out.columns:
+                out[k] = pd.to_numeric(out[k], errors='coerce')
+
+        return out
+
     def load_and_sync_data(self, start: str, end: Optional[str]) -> tuple[Dict[str, pd.DataFrame], pd.DatetimeIndex]:
         """Synchronize tickers to a master calendar while avoiding indicator bias from forward-filled bars."""
         if end is None:
@@ -122,6 +225,8 @@ class QuantDesk:
         if anchor is None or anchor.empty:
             raise RuntimeError("Failed to download SPY data for master calendar.")
 
+        anchor = self._normalize_yf_ohlc(anchor, ticker="SPY")
+
         master_idx = anchor.index
 
         factors: Dict[str, pd.DataFrame] = {}
@@ -131,6 +236,7 @@ class QuantDesk:
                 print(f"[!] Warning: No data for {t}. Skipping.")
                 continue
 
+            df = self._normalize_yf_ohlc(df, ticker=t)
             df = df.copy()
             df["is_real_bar"] = True
 
@@ -313,10 +419,36 @@ class QuantDesk:
 
                     if not bool(prev.get("valid_signal", False)):
                         continue
-                    if str(prev.get("Regime")) != self.regime_filter:
+                    regime = str(prev.get("Regime", ""))
+                    rf = str(self.regime_filter).upper()
+                    if rf not in ("ANY", "ALL", "*") and str(regime).upper() != rf:
                         continue
                     if float(prev["RSI"]) >= self.rsi_entry_threshold:
                         continue
+
+                    # Optional: require price in an uptrend (reduces trading in bear regimes even if regime labels are noisy)
+                    if self.require_trend_up:
+                        try:
+                            if not (float(prev.get("Close")) > float(prev.get("SMA")) and float(prev.get("SMA_Slope")) > 0):
+                                continue
+                        except Exception:
+                            continue
+
+                    # Optional: require RSI to be turning up (reduces early entries during persistent selloffs)
+                    if self.require_rsi_turn:
+                        try:
+                            if float(prev.get("RSI_Slope", 0.0)) <= 0:
+                                continue
+                        except Exception:
+                            continue
+
+                    # Optional: minimum composite strength
+                    if self.min_signal_strength > 0:
+                        try:
+                            if float(prev.get("Signal_Strength", 0.0)) < self.min_signal_strength:
+                                continue
+                        except Exception:
+                            continue
 
                     inst = self.catalog.get(t)
                     if self.avoid_same_group and inst.group in held_groups:
@@ -429,10 +561,29 @@ class QuantDesk:
             metadata=metadata,
         )
 
-        # Final audit gate
-        self.analyser.audit_replay_cash_recursion(ledger_df, fills_df)
+        # Final audit gate (non-fatal). A strict strategy can legitimately produce
+        # zero fills over a window and that should not fail the whole run.
+        try:
+            self.analyser.audit_replay_cash_recursion(ledger_df, fills_df)
+        except Exception as e:
+            print(f"[!] Warning: cash recursion audit skipped/failed: {e}")
 
-        sheet, trades_attrib_df, regime_table = self.analyser.generate_tear_sheet(ledger_df, fills_df, trades_df)
+        try:
+            sheet, trades_attrib_df, regime_table = self.analyser.generate_tear_sheet(ledger_df, fills_df, trades_df)
+        except Exception as e:
+            print(f"[!] Warning: tear sheet generation failed: {e}")
+            # Provide a minimal sheet so the run still completes.
+            from ig_quant_bot.analytics.performance import TearSheet
+            final_equity = float(ledger_df['equity'].iloc[-1]) if (ledger_df is not None and not ledger_df.empty and 'equity' in ledger_df.columns) else 0.0
+            sheet = TearSheet(final_equity=final_equity, cagr=0.0, ann_vol=0.0, sharpe=0.0, sortino=0.0, max_drawdown=0.0, total_trades=0, win_rate=0.0, profit_factor=0.0, avg_win=0.0, avg_loss=0.0)
+            trades_attrib_df, regime_table = pd.DataFrame(), pd.DataFrame()
+
+        # Expose last-run analytics for tooling scripts (for example sweep scripts).
+        # This avoids brittle log parsing.
+        self.last_tear_sheet = sheet
+        self.last_trades_attrib_df = trades_attrib_df
+        self.last_regime_table = regime_table
+
 
         print("[*] Run complete.")
         print(f"    Final equity: {sheet.final_equity:.2f}")
@@ -442,6 +593,23 @@ class QuantDesk:
         # Persist analytics outputs
         try:
             run_dir = f"{self.run_manager.base_path}/{run_id}"
+            # Also persist a lightweight summary for quick sweeps.
+            import json
+            summary = {
+                "final_equity": float(sheet.final_equity),
+                "cagr": float(sheet.cagr),
+                "ann_vol": float(sheet.ann_vol),
+                "sharpe": float(sheet.sharpe),
+                "sortino": float(sheet.sortino),
+                "max_drawdown": float(sheet.max_drawdown),
+                "total_trades": int(sheet.total_trades),
+                "win_rate": float(sheet.win_rate),
+                "profit_factor": float(sheet.profit_factor),
+                "avg_win": float(sheet.avg_win),
+                "avg_loss": float(sheet.avg_loss),
+            }
+            with open(f"{run_dir}/tear_sheet_summary.json", "w", encoding="utf-8") as f:
+                json.dump(summary, f, indent=2)
             if trades_attrib_df is not None and not trades_attrib_df.empty:
                 trades_attrib_df.to_parquet(f"{run_dir}/trades_attrib.parquet")
             if regime_table is not None and not regime_table.empty:

@@ -1,107 +1,152 @@
-# quant_bot (IG-style research backtester)
+# IG Quant Bot (UK IG.com) – Paper Trading Framework
 
-This repository contains a research backtester that simulates an IG-style spread-betting account using daily OHLC data.
+This repository is a learning friendly framework for running a simple systematic strategy with **IG.com UK**.
 
-## What it is (and what it is not)
+Key goals
+- Run once and exit (Task Scheduler or cron friendly)
+- Crash safe by design (reconciles positions from IG)
+- Low API usage (history caching, per run budgets, backfill fallback)
+- Traceability (decision logs explain every skip, entry, and exit)
 
-- **Default data source:** `yfinance` (tickers like `SPY`, `QQQ`, `GLD`). These are **ETFs**.
-- **Simulation model:** a simplified IG-style spread model + margin locks/releases + overnight financing.
+## Safety modes
 
-Because ETFs are not the same as IG index/DFB markets, you should treat the defaults as an **ETF-proxy research setup** unless you replace the price source with true market data aligned to the IG contract you trade.
+The bot supports three layers of safety:
+1. **Offline smoke mode**: no IG login, no orders
+2. **Dry run live mode**: connects to IG but does not place orders
+3. **DEMO live paper mode**: places trades on your DEMO account
 
-## Quickstart
+## Quick start
 
-1) Create a virtual environment and install dependencies:
+1) Create a virtualenv and install dependencies
 
 ```bash
+python -m venv .venv
+.\.venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-2) Run the backtest from the repo root:
+2) Set IG credentials in environment variables
 
 ```bash
-python -m ig_quant_bot.main
+set IG_API_KEY=...
+set IG_USERNAME=...
+set IG_PASSWORD=...
+set IG_ACCOUNT_ID=...
 ```
 
-3) Output artifacts are written to `vault/runs/<run_id>/` (ledger, fills, trades and metadata).
-
-## Configuration
-
-Edit `config.yaml` to control:
-- Universe tickers
-- RSI and regime filter
-- Costs: adaptive spread, financing and optional fixed commission
-- Risk: position sizing, ATR stop/TP and time-stop
-
-## Live paper trading (IG UK DEMO)
-
-This repo includes a "ready enough" live runner that can place orders on IG **DEMO** using the `trading-ig` library.
-
-1) Copy `.env.example` to `.env` and set your IG **DEMO** credentials.
-
-2) Run an **offline smoke test** (does not connect to IG, validates config and logging):
+3) Run the offline smoke test
 
 ```bash
-python scripts/live_papertrade.py --smoke
+python scripts/live_papertrade.py --smoke --config config.yaml
 ```
 
-3) Run a **dry-run** live cycle (connects to IG but does not place orders):
+4) Run the IG connectivity check
+
+```bash
+python scripts/ig_connectivity_check.py --config config.yaml --ticker QQQ --debug
+```
+
+5) Run a dry run live cycle (no orders)
 
 ```bash
 python scripts/live_papertrade.py --config config.yaml
 ```
 
-4) When you are comfortable with the decisions and logs, set `live.dry_run: false` in `config.yaml`.
+6) Enable DEMO paper trading
+- In `config.yaml` set `live.allow_live: true`
+- In `config.yaml` set `live.dry_run: false`
 
-Each live run writes:
-- `vault/runs/<run_id>/run.log`
-- `vault/runs/<run_id>/decision_log.csv` (the full "why did we trade or skip" reasoning)
-
-Compatibility note: different `trading-ig` versions use different parameter names for historical data (for example `numpoints` vs `num_points`). The live adapter handles both.
-
-Optional: validate login and data access before running the live cycle:
+Then run the same command again
 
 ```bash
-python scripts/ig_connectivity_check.py --config config.yaml --ticker QQQ
+python scripts/live_papertrade.py --config config.yaml
 ```
 
-### Avoiding IG API quota exhaustion (ApiExceededException)
+## Config files
 
-IG REST endpoints are quota-limited. Repeated history fetches across multiple symbols can trigger `ApiExceededException` and, in some cases, you may need to wait for quota to replenish.
+- `config.yaml` is the default single instrument config (QQQ only)
+- `config_multi.yaml` is the multi instrument version (QQQ, SPY, GLD)
+- `config_A1.yaml` and `config_A2.yaml` are starter configs for backtests and learning
 
-This repo protects your quota in three ways:
-- **Rate limiting** between IG calls
-- **Local history cache** under `vault/cache/ig_history/`
-- **Per-run API budget** (`live.api_budget.max_history_calls_per_run`) so a single run cannot spam the history endpoint
+## Avoiding IG ApiExceeded
 
-Recommended testing workflow:
+IG can throttle or block API usage if you call endpoints too often.
 
-1) Fetch once and cache for each symbol (run these with a few seconds gap):
+This repo reduces API usage using:
+- A history cache (`live.history_cache`) stored under `vault/cache/ig_history`
+- A per run history budget (`live.api_budget.max_history_calls_per_run`)
+- A rate limiter (`live.rate_limit.min_interval_seconds`) and cooldown handling
+- Optional yfinance fallback for history when your IG budget is exhausted
+
+Practical advice
+- Start with one instrument (QQQ)
+- Keep `max_history_calls_per_run` at 1 while learning
+- Run the bot on a schedule (hourly or daily), not in a tight loop
+- Prefer cached history for repeated experiments
+
+
+## Margin factors and dynamic margin
+
+`InstrumentCatalog` contains default margin factors for sizing and pre-trade gating.
+IG can change margin requirements dynamically in volatile periods so treat these defaults as conservative hints, not guarantees.
+
+Practical guidance
+
+You can override margin factors in config without editing Python:
+
+```yaml
+risk:
+  margin_factor_override:
+    QQQ: 0.50
+```
+- Keep `risk.per_slot_margin_fraction` modest while learning
+- Keep `risk.min_free_margin_buffer` at 0.10 or higher
+- If IG rejects an order due to margin, reduce stake and re-run
+
+## Order parameter compatibility
+
+The live adapter uses defensive order placement because different `trading-ig` versions accept slightly different parameter shapes.
+This is intentional so you can upgrade dependencies without rewriting the bot.
+
+## Strategy overview (simple by intention)
+
+Entry (long only)
+- Regime filter: price above long SMA (bull stable)
+- RSI oversold trigger
+- Optional minimum signal strength filter
+
+Risk and position sizing
+- Margin based cap per slot
+- Optional risk per trade cap using ATR stop distance
+- Free margin buffer gate to prevent over allocation
+
+Exit
+- Base exit: RSI mean reversion threshold
+- Time stop (max hold days)
+- Optional adverse exit (if oversold trade fails to recover)
+- Optional trailing stop using ATR
+
+## Outputs
+
+- `vault/live_state/state.json` stores idempotency keys and position metadata
+- `vault/decisions/decision_log.csv` explains every decision
+- `vault/runs/<run_id>/` stores trade ledgers and performance artifacts
+
+
+
+## Quick parameter sweep (offline backtest)
+
+Run a small sweep of RSI entry thresholds and regime filter to get enough trades for learning:
 
 ```bash
-python scripts/ig_connectivity_check.py --config config.yaml --ticker QQQ --write-cache
-python scripts/ig_connectivity_check.py --config config.yaml --ticker SPY --write-cache
-python scripts/ig_connectivity_check.py --config config.yaml --ticker GLD --write-cache
+python scripts/sweep_rsi_thresholds.py --base-config config_A1.yaml --start 2018-01-01 --rsi-entries 30,35,40,45 --regimes BULL_STABLE,ANY
 ```
 
-2) After caching, use cached data (no IG history call):
 
-```bash
-python scripts/ig_connectivity_check.py --config config.yaml --ticker QQQ --use-cache
-```
+## Entry quality filters (optional)
 
-3) Run the live runner. It will prefer the cache and only refresh a small tail when needed.
+- `strategy.require_trend_up`: only enter when Close > SMA and SMA_Slope > 0
+- `strategy.require_rsi_turn`: only enter when RSI_Slope > 0 (RSI turning up)
+- `strategy.min_signal_strength`: minimum composite Signal_Strength score
 
-If you still hit `ApiExceededException`, reduce `live.api_budget.max_history_calls_per_run`, increase `live.rate_limit.min_interval_seconds` and avoid repeated rapid runs.
-
-## Notes on technique defaults
-
-The updated defaults are intentionally more conservative for daily bars:
-- Exit RSI uses a lower threshold (mean-reversion exit)
-- Optional ATR stop-loss and take-profit
-- Optional max holding period
-- Optional rule to avoid holding two instruments from the same group (e.g., `SPY` and `QQQ`)
-
-## Disclaimer
-
-This is research software. It is not financial advice. Validate with your own data, slippage model and brokerage rules before using any strategy live.
+See `config_A1_edge.yaml` and `config_A2_edge.yaml`.

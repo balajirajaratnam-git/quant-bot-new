@@ -1,14 +1,15 @@
 strategy:
-  name: IG_MR_A1
+  name: IG_MR_A2_EDGE_RUNNER
   universe:
   - QQQ
   rsi_period: 14
   sma_period: 200
-  rsi_entry_threshold: 30
-  rsi_exit_threshold: 50
-  regime_filter: BULL_STABLE
+  rsi_entry_threshold: 40
+  rsi_exit_threshold: 65
+  regime_filter: TREND_UP
   require_trend_up: true
   require_rsi_turn: true
+  min_signal_strength: 0.0
 risk:
   initial_capital: 100000.0
   max_slots: 1
@@ -16,10 +17,10 @@ risk:
   per_slot_margin_fraction: 0.1
   min_free_margin_buffer: 0.15
   allow_shorting: false
-  risk_per_trade_fraction: 0.004
-  atr_stop_mult: 1.8
-  atr_take_profit_mult: 1.8
-  max_hold_days: 10
+  risk_per_trade_fraction: 0.003
+  atr_stop_mult: 1.6
+  atr_take_profit_mult: 0.0
+  max_hold_days: 20
   avoid_same_group: true
 costs:
   annual_funding_rate: 0.05

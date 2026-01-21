@@ -1,0 +1,2 @@
+ts_utc,run_id,date,ticker,phase,action,side,qty,price_mid,stop_level,limit_level,regime,rsi,atr_pts,equity,free_margin,margin_used,reason_code,idempotency_key,details_json
+2026-01-16T23:03:09.403562+00:00,smoke_20260116T230309Z,2026-01-16,SYSTEM,SYSTEM,INFO,,0.0,0.0,0.0,0.0,,0.0,0.0,0.0,0.0,0.0,SMOKE_OK,,"{""dry_run"": true, ""universe"": [""QQQ"", ""SPY"", ""GLD""], ""live_resolution"": ""DAY"", ""lookback_points"": 450}"

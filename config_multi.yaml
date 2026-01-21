@@ -1,26 +1,35 @@
 strategy:
-  name: IG_MR_A1
+  name: IG_Quant_Run_v2
   universe:
   - QQQ
+  - SPY
+  - GLD
   rsi_period: 14
   sma_period: 200
-  rsi_entry_threshold: 30
-  rsi_exit_threshold: 50
+  rsi_entry_threshold: 28
+  rsi_exit_threshold: 45
   regime_filter: BULL_STABLE
-  require_trend_up: true
-  require_rsi_turn: true
+  min_signal_strength: 50
 risk:
   initial_capital: 100000.0
-  max_slots: 1
-  max_drawdown_limit: 0.1
-  per_slot_margin_fraction: 0.1
-  min_free_margin_buffer: 0.15
+  max_slots: 2
+  max_drawdown_limit: 0.15
+  per_slot_margin_fraction: 0.15
+  min_free_margin_buffer: 0.1
   allow_shorting: false
-  risk_per_trade_fraction: 0.004
-  atr_stop_mult: 1.8
-  atr_take_profit_mult: 1.8
+  risk_per_trade_fraction: 0.005
+  atr_stop_mult: 1.5
+  atr_take_profit_mult: 2.0
   max_hold_days: 10
   avoid_same_group: true
+  trailing_stop:
+    enabled: true
+    activation_atr_mult: 1.0
+    trail_atr_mult: 1.2
+  adverse_exit:
+    enabled: true
+    min_days: 3
+    rsi_recovered_threshold: 40
 costs:
   annual_funding_rate: 0.05
   weekend_multiplier: 3
@@ -41,7 +50,7 @@ live:
   lookback_points: 450
   rate_limit:
     min_interval_seconds: 3.0
-    cooldown_seconds_on_exceeded: 90.0
+    cooldown_seconds_on_exceeded: 75.0
     max_retries: 1
   history_cache:
     enabled: true

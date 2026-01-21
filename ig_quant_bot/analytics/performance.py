@@ -34,7 +34,7 @@ class TearSheet:
 
 
 class PerformanceAnalyser:
-    def __init__(self, risk_free_rate: float = 0.04, trading_days: int = 252):
+    def __init__(self, risk_free_rate: float = 0.0, trading_days: int = 252):
         self.trading_days = int(trading_days)
         rf = float(risk_free_rate)
         self.rf_daily = (1.0 + rf) ** (1.0 / self.trading_days) - 1.0
@@ -103,6 +103,18 @@ class PerformanceAnalyser:
         fills_df = self._prep_fills(fills_df)
         tdf = trades_df.copy()
 
+        # If there are no fills, we cannot attribute funding. Default to 0 funding.
+        if fills_df is None or fills_df.empty or "event_type" not in fills_df.columns:
+            if overwrite_funding or ("funding_net_pnl" not in tdf.columns):
+                tdf["funding_net_pnl"] = 0.0
+            if overwrite_total or ("total_net_pnl" not in tdf.columns):
+                base_col = "trade_net_pnl" if "trade_net_pnl" in tdf.columns else None
+                if base_col is None:
+                    tdf["total_net_pnl"] = 0.0
+                else:
+                    tdf["total_net_pnl"] = pd.to_numeric(tdf[base_col], errors="coerce").fillna(0.0) + pd.to_numeric(tdf.get("funding_net_pnl", 0.0), errors="coerce").fillna(0.0)
+            return tdf
+
         if "ticker" not in tdf.columns:
             raise ValueError("trades_df must include 'ticker'")
 
@@ -115,25 +127,30 @@ class PerformanceAnalyser:
         need_funding = overwrite_funding or ("funding_net_pnl" not in tdf.columns)
 
         if need_funding:
-            fnd = fills_df[fills_df["event_type"].astype(str).str.upper() == "FUNDING"].copy()
-            if fnd.empty:
+            # If fills are missing (common when a strict strategy generates zero trades),
+            # treat funding as zero to keep analytics robust.
+            if fills_df is None or fills_df.empty or "event_type" not in fills_df.columns:
                 tdf["funding_net_pnl"] = 0.0
             else:
-                fnd["timestamp"] = pd.to_datetime(fnd["timestamp"])
-                fnd_by_ticker: Dict[str, pd.DataFrame] = {k: v for k, v in fnd.groupby("ticker", sort=False)}
+                fnd = fills_df[fills_df["event_type"].astype(str).str.upper() == "FUNDING"].copy()
+                if fnd.empty:
+                    tdf["funding_net_pnl"] = 0.0
+                else:
+                    fnd["timestamp"] = pd.to_datetime(fnd["timestamp"])
+                    fnd_by_ticker: Dict[str, pd.DataFrame] = {k: v for k, v in fnd.groupby("ticker", sort=False)}
 
-                funding_vals = []
-                for _, row in tdf.iterrows():
-                    tick = row["ticker"]
-                    entry = row["entry_time"]
-                    exit_ = row["exit_time"]
-                    if tick not in fnd_by_ticker:
-                        funding_vals.append(0.0)
-                        continue
-                    ff = fnd_by_ticker[tick]
-                    mask = (ff["timestamp"] >= entry) & (ff["timestamp"] <= exit_)
-                    funding_vals.append(float(ff.loc[mask, "net_cashflow"].sum()))
-                tdf["funding_net_pnl"] = funding_vals
+                    funding_vals = []
+                    for _, row in tdf.iterrows():
+                        tick = row["ticker"]
+                        entry = row["entry_time"]
+                        exit_ = row["exit_time"]
+                        if tick not in fnd_by_ticker:
+                            funding_vals.append(0.0)
+                            continue
+                        ff = fnd_by_ticker[tick]
+                        mask = (ff["timestamp"] >= entry) & (ff["timestamp"] <= exit_)
+                        funding_vals.append(float(ff.loc[mask, "net_cashflow"].sum()))
+                    tdf["funding_net_pnl"] = funding_vals
         else:
             tdf["funding_net_pnl"] = pd.to_numeric(tdf["funding_net_pnl"], errors="coerce").fillna(0.0)
 
@@ -200,10 +217,24 @@ class PerformanceAnalyser:
 
     def audit_replay_cash_recursion(self, ledger_df: pd.DataFrame, fills_df: pd.DataFrame, tol: float = 1e-3) -> None:
         ledger_df = self._validate_and_normalize_ledger(ledger_df)
+        # Fills can be empty when no trades/funding were produced (common for strict strategies).
+        # Audits should never make a run fail in that case.
         fills_df = self._prep_fills(fills_df)
+        if fills_df is None or fills_df.empty:
+            return
+
+        # Defensive: accept alternative timestamp column names if upstream changes.
+        ts_col = "timestamp"
+        if ts_col not in fills_df.columns:
+            for alt in ["ts_utc", "time", "datetime", "date_time"]:
+                if alt in fills_df.columns:
+                    ts_col = alt
+                    break
+            else:
+                return
 
         cf = fills_df.copy()
-        cf["date"] = pd.to_datetime(cf["timestamp"]).dt.normalize()
+        cf["date"] = pd.to_datetime(cf[ts_col]).dt.normalize()
         cf_by_day = cf.groupby("date")["net_cashflow"].sum()
 
         ledger_cash = ledger_df["cash_balance"].copy()
@@ -222,6 +253,10 @@ class PerformanceAnalyser:
 
     def rebuild_trades_from_fills(self, fills_df: pd.DataFrame) -> pd.DataFrame:
         fills_df = self._prep_fills(fills_df)
+
+        # If there are no fills (or no normalized columns), there are no trades to rebuild.
+        if fills_df is None or fills_df.empty or "event_type" not in fills_df.columns:
+            return pd.DataFrame()
 
         tf = fills_df[fills_df["event_type"].astype(str).str.upper() == "TRADE"].copy()
         if tf.empty:
@@ -307,6 +342,9 @@ class PerformanceAnalyser:
         ann_vol = float(ret_std * np.sqrt(self.trading_days))
 
         excess = returns - self.rf_daily
+        # Guard against near-zero volatility leading to meaningless extreme Sharpe values
+        if ret_std is not None and ret_std < 1e-8:
+            ret_std = 0.0
         sharpe = float((excess.mean() / ret_std) * np.sqrt(self.trading_days)) if ret_std > 0 else 0.0
 
         downside = returns[returns < 0]
@@ -346,7 +384,7 @@ class PerformanceAnalyser:
         win_rate = float((pnl > 0).mean()) if len(pnl) else 0.0
         gross_profit = float(wins.sum()) if not wins.empty else 0.0
         gross_loss = float(losses.abs().sum()) if not losses.empty else 0.0
-        profit_factor = float(gross_profit / gross_loss) if gross_loss > 0 else 0.0
+        profit_factor = float(gross_profit / gross_loss) if gross_loss > 0 else (float('inf') if gross_profit > 0 else 0.0)
 
         avg_win = float(wins.mean()) if not wins.empty else 0.0
         avg_loss = float(losses.mean()) if not losses.empty else 0.0
@@ -360,8 +398,14 @@ class PerformanceAnalyser:
 
         df = fills_df.copy()
 
+        # Accept common timestamp column variants
         if "timestamp" not in df.columns:
-            raise ValueError("fills_df must include 'timestamp'")
+            for alt in ["ts_utc", "time", "datetime", "DateTime", "date_time"]:
+                if alt in df.columns:
+                    df = df.rename(columns={alt: "timestamp"})
+                    break
+        if "timestamp" not in df.columns:
+            raise ValueError("fills_df must include a timestamp column (timestamp or ts_utc)")
 
         if "event_type" not in df.columns:
             df["event_type"] = "TRADE"

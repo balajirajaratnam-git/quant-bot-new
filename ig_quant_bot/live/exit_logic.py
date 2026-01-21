@@ -156,47 +156,66 @@ def evaluate_entry_quality(
     rsi_entry_threshold: float = 28.0,
     min_signal_strength: float = 50.0,
     regime_filter: str = "BULL_STABLE",
+    require_trend_up: bool = False,
+    require_rsi_turn: bool = False,
 ) -> Tuple[bool, float, str, Dict[str, Any]]:
-    """Evaluate whether current conditions warrant an entry.
-    
-    This function checks entry conditions and returns a quality score.
-    Higher scores indicate higher conviction entries.
-    
-    Args:
-        row: Feature row from FeatureEngine
-        rsi_entry_threshold: Maximum RSI for entry (lower = more oversold)
-        min_signal_strength: Minimum Signal_Strength score to consider
-        regime_filter: Required regime string
-    
-    Returns:
-        Tuple of (should_enter, score, skip_reason, details)
+    """Evaluate whether an entry is permitted on the given bar.
+
+    Returns: (allowed, quality_score, reason_code, details)
     """
     details: Dict[str, Any] = {}
-    
-    rsi = float(row.get("RSI", 50.0))
-    regime = str(row.get("Regime", "UNKNOWN"))
-    signal_strength = float(row.get("Signal_Strength", 0.0))
-    trend_strength = float(row.get("Trend_Strength", 50.0))
-    
+
+    rsi = float(row.get("RSI", np.nan))
+    regime = str(row.get("Regime", ""))
+    strength = float(row.get("Signal_Strength", 0.0))
+
     details["rsi"] = rsi
     details["regime"] = regime
-    details["signal_strength"] = signal_strength
-    details["trend_strength"] = trend_strength
-    
-    # Check regime filter
-    if regime != regime_filter:
-        return (False, 0.0, "REGIME_MISMATCH", details)
-    
+    details["signal_strength"] = strength
+
+    # Regime filter: keep behavior aligned with backtests
+    rf = str(regime_filter or "").upper()
+    if rf not in ("", "ANY"):
+        if rf == "NOT_BEAR":
+            if regime.upper() == "BEAR_TREND":
+                return (False, 0.0, "REGIME_BEAR_BLOCKED", details)
+        elif rf in ("BULL", "TREND_UP"):
+            try:
+                if not (float(row.get("Close")) > float(row.get("SMA")) and float(row.get("SMA_Slope")) > 0):
+                    return (False, 0.0, "TREND_FILTER_FAIL", details)
+            except Exception:
+                return (False, 0.0, "TREND_FILTER_FAIL", details)
+        else:
+            if regime != regime_filter:
+                return (False, 0.0, "REGIME_MISMATCH", details)
+
+    # Optional: require trend up even if regime filter is loose
+    if require_trend_up:
+        try:
+            if not (float(row.get("Close")) > float(row.get("SMA")) and float(row.get("SMA_Slope")) > 0):
+                return (False, 0.0, "TREND_FILTER_FAIL", details)
+        except Exception:
+            return (False, 0.0, "TREND_FILTER_FAIL", details)
+
+    # Optional: require RSI to be turning up
+    if require_rsi_turn:
+        try:
+            if float(row.get("RSI_Slope", 0.0)) <= 0:
+                return (False, 0.0, "RSI_NOT_TURNING_UP", details)
+        except Exception:
+            return (False, 0.0, "RSI_NOT_TURNING_UP", details)
+
     # Check RSI threshold
-    if rsi >= rsi_entry_threshold:
-        details["rsi_threshold"] = rsi_entry_threshold
+    if not np.isfinite(rsi):
+        return (False, 0.0, "RSI_NAN", details)
+    if rsi >= float(rsi_entry_threshold):
         return (False, 0.0, "RSI_NOT_LOW_ENOUGH", details)
-    
-    # Check signal strength threshold
-    if signal_strength < min_signal_strength:
-        details["min_signal_strength"] = min_signal_strength
+
+    # Check signal strength
+    if strength < float(min_signal_strength):
         return (False, 0.0, "SIGNAL_STRENGTH_TOO_LOW", details)
-    
-    # All checks passed - return score for ranking
-    # Score is the Signal_Strength from FeatureEngine (0-100 scale)
-    return (True, signal_strength, "ENTRY_QUALIFIED", details)
+
+    # Quality score: lower RSI and higher strength is better
+    quality = float((rsi_entry_threshold - rsi)) + 0.01 * strength
+    details["quality"] = quality
+    return (True, quality, "OK", details)
