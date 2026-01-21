@@ -40,6 +40,61 @@ class RunManager:
         run_dir = os.path.join(self.base_path, run_id)
         os.makedirs(run_dir, exist_ok=True)
 
+        # --- Always write CSV artifacts (even when empty) ---
+        # This makes downstream analysis scripts robust (no missing files).
+        # Parquet is still written (when non-empty) for compact storage.
+        def _ensure_cols(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
+            if df is None:
+                return pd.DataFrame(columns=cols)
+            if df.empty and len(df.columns) == 0:
+                return pd.DataFrame(columns=cols)
+            return df
+
+        # Canonical schemas for empty outputs
+        fills_cols = [
+            "fill_id",
+            "order_id",
+            "ticker",
+            "timestamp",
+            "event_type",
+            "side",
+            "qty",
+            "price",
+            "fee_cashflow",
+            "margin_change",
+            "realized_pnl_cashflow",
+            "net_cashflow",
+            "gross_notional",
+            "regime",
+            "reason",
+        ]
+        trades_cols = [
+            "ticker",
+            "entry_time",
+            "exit_time",
+            "entry_regime",
+            "exit_reason",
+            "trade_net_pnl",
+            "funding_net_pnl",
+            "fees_total",
+            "liquidation_net_pnl",
+            "total_net_pnl",
+            "peak_notional",
+            "return_pct",
+        ]
+
+        # Write CSVs (always)
+        if ledger_df is not None:
+            ledger_df.to_csv(os.path.join(run_dir, "ledger.csv"), index=True)
+        if fills_df is not None:
+            _ensure_cols(fills_df, fills_cols).to_csv(os.path.join(run_dir, "fills.csv"), index=False)
+        else:
+            pd.DataFrame(columns=fills_cols).to_csv(os.path.join(run_dir, "fills.csv"), index=False)
+        if trades_df is not None:
+            _ensure_cols(trades_df, trades_cols).to_csv(os.path.join(run_dir, "trades.csv"), index=False)
+        else:
+            pd.DataFrame(columns=trades_cols).to_csv(os.path.join(run_dir, "trades.csv"), index=False)
+
         # Save parquet artifacts
         if ledger_df is not None and not ledger_df.empty:
             ledger_df.to_parquet(os.path.join(run_dir, "ledger.parquet"))
